@@ -3,6 +3,8 @@ import os
 from dotenv import load_dotenv
 from APIWrapper import Obsidian
 from pydantic import BaseModel, field_validator
+import time
+import httpx
 
 # Load environment variables
 load_dotenv()
@@ -20,12 +22,21 @@ if not api_key:
 # Create Obsidian API client
 api = Obsidian(api_key=api_key, host=host)
 
-#to measure latency difference between requests and async
-import time
+# ========================
+# CIRCUIT BREAKER STATE
+# ========================
 
+circuit = {
+    "failures": 0,
+    "state": "CLOSED",  # CLOSED, OPEN, HALF_OPEN
+    "last_failure_time": 0
+}
+
+FAILURE_THRESHOLD = 3
+RECOVERY_TIME = 10  # seconds
 
 # ========================
-#  RESPONSE HELPERS
+# RESPONSE HELPERS
 # ========================
 
 def success(data):
@@ -34,9 +45,8 @@ def success(data):
 def error(message):
     return {"success": False, "error": message}
 
-
 # ========================
-#  INPUT VALIDATION
+# INPUT VALIDATION
 # ========================
 
 class FilePathInput(BaseModel):
@@ -60,14 +70,12 @@ class DirPathInput(BaseModel):
             raise ValueError("dirpath is required")
         return v
 
-
 # ========================
-#  FILE OPERATIONS
+# FILE OPERATIONS
 # ========================
 
 @mcp.tool()
 async def list_files_in_vault():
-    """List all note file paths available in the Obsidian vault"""
     try:
         return success(await api.list_files_in_vault())
     except Exception as e:
@@ -76,7 +84,6 @@ async def list_files_in_vault():
 
 @mcp.tool()
 async def list_files_in_dir(input: DirPathInput):
-    """List note file paths inside a specific directory"""
     try:
         return success(await api.list_files_in_dir(input.dirpath))
     except Exception as e:
@@ -85,7 +92,6 @@ async def list_files_in_dir(input: DirPathInput):
 
 @mcp.tool()
 async def list_note_titles():
-    """List only note file names (without content) for quick navigation"""
     try:
         files = await api.list_files_in_vault()
         titles = [f.split("/")[-1] for f in files]
@@ -95,9 +101,7 @@ async def list_note_titles():
 
 
 @mcp.tool()
-
 async def get_file_contents(input: FilePathInput):
-    """Retrieve full markdown content of a note using its relative file path in the vault"""
     try:
         return success(await api.get_file_contents(input.filepath))
     except Exception as e:
@@ -106,21 +110,17 @@ async def get_file_contents(input: FilePathInput):
 
 @mcp.tool()
 async def batch_get_file_contents(filepaths: list[str]):
-    """Retrieve and combine contents of multiple notes"""
     try:
         return success(await api.get_batch_file_contents(filepaths))
     except Exception as e:
         return error(str(e))
 
-
 # ========================
-#  SEARCH
+# SEARCH
 # ========================
 
 @mcp.tool()
-
 async def simple_search(query: str, context_length: int = 100):
-    """Search for text across notes and return matching snippets with context"""
     try:
         return success(await api.search(query, context_length))
     except Exception as e:
@@ -128,8 +128,7 @@ async def simple_search(query: str, context_length: int = 100):
 
 
 @mcp.tool()
-async  def complex_search(query: dict):
-    """Perform advanced structured search using JsonLogic queries"""
+async def complex_search(query: dict):
     try:
         return success(await api.search_json(query))
     except Exception as e:
@@ -138,10 +137,6 @@ async  def complex_search(query: dict):
 
 @mcp.tool()
 async def search_and_summarize(query: str):
-    """
-    Search for relevant notes and return a concise combined summary.
-    Useful for quick insights instead of full note content.
-    """
     try:
         results = await api.search(query, 100)
 
@@ -152,7 +147,7 @@ async def search_and_summarize(query: str):
         for item in results[:5]:
             combined_text += item.get("content", "") + "\n\n"
 
-        summary = combined_text[:500]  # simple truncation
+        summary = combined_text[:500]
 
         return success({
             "summary": summary,
@@ -162,14 +157,12 @@ async def search_and_summarize(query: str):
     except Exception as e:
         return error(str(e))
 
-
 # ========================
-#  WRITE / MODIFY
+# WRITE / MODIFY
 # ========================
 
 @mcp.tool()
 async def create_note(input: FilePathInput, content: str):
-    """Create a new note with given content. Overwrites if file already exists."""
     try:
         await api.put_content(input.filepath, content)
         return success(f"Created note {input.filepath}")
@@ -178,9 +171,7 @@ async def create_note(input: FilePathInput, content: str):
 
 
 @mcp.tool()
-
 async def append_content(input: FilePathInput, content: str):
-    """Append content to an existing note"""
     try:
         await api.append_content(input.filepath, content)
         return success(f"Appended content to {input.filepath}")
@@ -190,7 +181,6 @@ async def append_content(input: FilePathInput, content: str):
 
 @mcp.tool()
 async def patch_content(filepath: str, operation: str, target_type: str, target: str, content: str):
-    """Modify specific sections inside a note"""
     try:
         await api.patch_content(filepath, operation, target_type, target, content)
         return success(f"Patched content in {filepath}")
@@ -200,7 +190,6 @@ async def patch_content(filepath: str, operation: str, target_type: str, target:
 
 @mcp.tool()
 async def put_content(input: FilePathInput, content: str):
-    """Overwrite or create a note with full content"""
     try:
         await api.put_content(input.filepath, content)
         return success(f"Updated file {input.filepath}")
@@ -210,7 +199,6 @@ async def put_content(input: FilePathInput, content: str):
 
 @mcp.tool()
 async def delete_file(input: FilePathInput, confirm: bool):
-    """Delete a note (requires confirm=True)"""
     try:
         if not confirm:
             return error("confirm must be true")
@@ -219,52 +207,41 @@ async def delete_file(input: FilePathInput, confirm: bool):
     except Exception as e:
         return error(str(e))
 
-
 # ========================
-#  PERIODIC NOTES
+# CIRCUIT BREAKER + HEALTH CHECK
 # ========================
-
-@mcp.tool()
-async def get_periodic_note(period: str, type: str = "content"):
-    """Retrieve periodic notes such as daily, weekly, or monthly notes"""
-    try:
-        return success(await api.get_periodic_note(period, type))
-    except Exception as e:
-        return error(str(e))
-
-
-@mcp.tool()
-async def get_recent_periodic_notes(period: str, limit: int = 5, include_content: bool = False):
-    """Retrieve recently created periodic notes"""
-    try:
-        return success(await api.get_recent_periodic_notes(period, limit, include_content))
-    except Exception as e:
-        return error(str(e))
-
-
-@mcp.tool()
-async def get_recent_changes(limit: int = 10, days: int = 90):
-    """Retrieve recently modified notes in the vault"""
-    try:
-        return success(await api.get_recent_changes(limit, days))
-    except Exception as e:
-        return error(str(e))
-
 
 @mcp.tool()
 async def check_connection():
     """
-    Verify API connectivity, authentication, and server health.
+    Verify API connectivity with circuit breaker protection
     """
 
-    import time
-    import httpx
+    global circuit
+    now = time.time()
+
+    # ------------------------
+    # CIRCUIT OPEN CHECK
+    # ------------------------
+    if circuit["state"] == "OPEN":
+        if now - circuit["last_failure_time"] < RECOVERY_TIME:
+            return error({
+                "status": "circuit_open",
+                "message": "Service temporarily unavailable. Skipping request.",
+                "retry_after_sec": RECOVERY_TIME
+            })
+        else:
+            circuit["state"] = "HALF_OPEN"
 
     start_time = time.time()
 
     try:
         files = await api.list_files_in_vault()
         latency = round((time.time() - start_time) * 1000, 2)
+
+        # RESET CIRCUIT ON SUCCESS
+        circuit["failures"] = 0
+        circuit["state"] = "CLOSED"
 
         return success({
             "status": "healthy",
@@ -275,42 +252,47 @@ async def check_connection():
                 "response_valid": isinstance(files, list)
             },
             "file_count": len(files),
-            "host": api.base_url
+            "host": api.base_url,
+            "circuit_state": circuit["state"]
         })
 
     except httpx.HTTPStatusError as e:
-        latency = round((time.time() - start_time) * 1000, 2)
-
-        return error({
-            "status": "unhealthy",
-            "latency_ms": latency,
-            "failure_type": "AUTH_OR_HTTP_ERROR",
-            "status_code": e.response.status_code,
-            "reason": e.response.text,
-            "host": api.base_url
-        })
+        failure_type = "AUTH_OR_HTTP_ERROR"
+        reason = e.response.text
+        status_code = e.response.status_code
 
     except httpx.RequestError as e:
-        latency = round((time.time() - start_time) * 1000, 2)
-
-        return error({
-            "status": "unhealthy",
-            "latency_ms": latency,
-            "failure_type": "NETWORK_ERROR",
-            "reason": str(e),
-            "host": api.base_url
-        })
+        failure_type = "NETWORK_ERROR"
+        reason = str(e)
+        status_code = None
 
     except Exception as e:
-        latency = round((time.time() - start_time) * 1000, 2)
+        failure_type = "UNKNOWN_ERROR"
+        reason = str(e)
+        status_code = None
 
-        return error({
-            "status": "unhealthy",
-            "latency_ms": latency,
-            "failure_type": "UNKNOWN_ERROR",
-            "reason": str(e),
-            "host": api.base_url
-        })
+    # ------------------------
+    # FAILURE HANDLING
+    # ------------------------
+    latency = round((time.time() - start_time) * 1000, 2)
+
+    circuit["failures"] += 1
+    circuit["last_failure_time"] = time.time()
+
+    if circuit["failures"] >= FAILURE_THRESHOLD:
+        circuit["state"] = "OPEN"
+
+    return error({
+        "status": "unhealthy",
+        "latency_ms": latency,
+        "failure_type": failure_type,
+        "status_code": status_code,
+        "reason": reason,
+        "host": api.base_url,
+        "circuit_state": circuit["state"],
+        "failure_count": circuit["failures"]
+    })
+
 # ========================
 # RUN SERVER
 # ========================
