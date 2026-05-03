@@ -251,6 +251,66 @@ async def get_recent_changes(limit: int = 10, days: int = 90):
         return error(str(e))
 
 
+@mcp.tool()
+async def check_connection():
+    """
+    Verify API connectivity, authentication, and server health.
+    """
+
+    import time
+    import httpx
+
+    start_time = time.time()
+
+    try:
+        files = await api.list_files_in_vault()
+        latency = round((time.time() - start_time) * 1000, 2)
+
+        return success({
+            "status": "healthy",
+            "latency_ms": latency,
+            "checks": {
+                "api_key": True,
+                "host_reachable": True,
+                "response_valid": isinstance(files, list)
+            },
+            "file_count": len(files),
+            "host": api.base_url
+        })
+
+    except httpx.HTTPStatusError as e:
+        latency = round((time.time() - start_time) * 1000, 2)
+
+        return error({
+            "status": "unhealthy",
+            "latency_ms": latency,
+            "failure_type": "AUTH_OR_HTTP_ERROR",
+            "status_code": e.response.status_code,
+            "reason": e.response.text,
+            "host": api.base_url
+        })
+
+    except httpx.RequestError as e:
+        latency = round((time.time() - start_time) * 1000, 2)
+
+        return error({
+            "status": "unhealthy",
+            "latency_ms": latency,
+            "failure_type": "NETWORK_ERROR",
+            "reason": str(e),
+            "host": api.base_url
+        })
+
+    except Exception as e:
+        latency = round((time.time() - start_time) * 1000, 2)
+
+        return error({
+            "status": "unhealthy",
+            "latency_ms": latency,
+            "failure_type": "UNKNOWN_ERROR",
+            "reason": str(e),
+            "host": api.base_url
+        })
 # ========================
 # RUN SERVER
 # ========================

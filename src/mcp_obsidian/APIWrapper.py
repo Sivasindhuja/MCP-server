@@ -21,7 +21,7 @@ class Obsidian():
 
         self.base_url = f'{self.protocol}://{self.host}:{self.port}'
 
-        # ✅ async client
+        # async client
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=10.0,
