@@ -227,6 +227,81 @@ async def delete_file(input: FilePathInput, confirm: bool):
     await api.delete_file(input.filepath)
     return success(f"Deleted {input.filepath}")
 
+import re
+from collections import Counter, defaultdict
+
+@circuit_protected
+@mcp.tool()
+async def get_vault_stats():
+    """
+    Returns a high-level summary of the vault:
+    - total notes
+    - link density
+    - most frequent tags
+    - orphaned files
+    """
+
+    files = await api.list_files_in_vault()
+
+    total_notes = len(files)
+
+    link_counts = []
+    tag_counter = Counter()
+    outgoing_links = defaultdict(set)
+    incoming_links = defaultdict(set)
+
+    # ------------------------
+    # PROCESS EACH FILE
+    # ------------------------
+    for file in files:
+        try:
+            content = await api.get_file_contents(file)
+
+            # ---- LINKS [[note]]
+            links = re.findall(r"\[\[([^\]]+)\]\]", content)
+            link_counts.append(len(links))
+
+            for link in links:
+                outgoing_links[file].add(link)
+                incoming_links[link].add(file)
+
+            # ---- TAGS #tag
+            tags = re.findall(r"#(\w+)", content)
+            tag_counter.update(tags)
+
+        except Exception:
+            continue  # skip problematic files
+
+    # ------------------------
+    # LINK DENSITY
+    # ------------------------
+    avg_link_density = (
+        sum(link_counts) / total_notes if total_notes > 0 else 0
+    )
+
+    # ------------------------
+    # ORPHANED FILES
+    # ------------------------
+    orphaned = []
+
+    for file in files:
+        has_outgoing = file in outgoing_links and outgoing_links[file]
+        has_incoming = file in incoming_links and incoming_links[file]
+
+        if not has_outgoing and not has_incoming:
+            orphaned.append(file)
+
+    # ------------------------
+    # RESULT
+    # ------------------------
+    return success({
+        "total_notes": total_notes,
+        "avg_link_density": round(avg_link_density, 2),
+        "top_tags": tag_counter.most_common(10),
+        "orphaned_files_count": len(orphaned),
+        "orphaned_files_sample": orphaned[:10]  # limit output
+    })
+
 # ========================
 # HEALTH CHECK (NO DECORATOR)
 # ========================

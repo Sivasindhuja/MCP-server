@@ -4,6 +4,60 @@ import os
 from typing import Any
 
 
+import asyncio
+import random
+from functools import wraps
+import httpx
+
+
+def retry_with_backoff(max_retries=3, base_delay=0.5, max_delay=5):
+    """
+    Retry decorator with exponential backoff + jitter.
+    Retries only transient failures (network, 429, 503).
+    """
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            attempt = 0
+
+            while True:
+                try:
+                    return await func(*args, **kwargs)
+
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+
+                    # Only retry transient errors
+                    if status not in (429, 503):
+                        raise
+
+                    error_type = f"HTTP {status}"
+
+                except httpx.RequestError:
+                    error_type = "NETWORK_ERROR"
+
+                except Exception:
+                    raise  # do NOT retry unknown errors
+
+                # ------------------------
+                # RETRY LOGIC
+                # ------------------------
+                if attempt >= max_retries:
+                    raise Exception(f"Max retries exceeded ({error_type})")
+
+                delay = min(max_delay, base_delay * (2 ** attempt))
+
+                # jitter
+                delay += random.uniform(0, delay * 0.1)
+
+                await asyncio.sleep(delay)
+                attempt += 1
+
+        return wrapper
+
+    return decorator
+
 class Obsidian():
     def __init__(
         self,
@@ -37,6 +91,8 @@ class Obsidian():
     # SAFE CALL
     # ========================
 
+    
+    @retry_with_backoff(max_retries=3, base_delay=0.5, max_delay=5)
     async def _safe_call(self, coro):
         try:
             return await coro
