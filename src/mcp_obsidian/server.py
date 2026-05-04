@@ -1,10 +1,9 @@
 from fastmcp import FastMCP
 import os
 from dotenv import load_dotenv
-from APIWrapper import Obsidian
+from mcp_obsidian.APIWrapper import Obsidian
 from pydantic import BaseModel, field_validator
 import time
-import httpx
 from functools import wraps
 
 # Load environment variables

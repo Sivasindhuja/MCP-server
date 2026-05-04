@@ -1,0 +1,18 @@
+name: obsidian-mcp
+description: MCP server to interact with Obsidian vault via Local REST API
+
+entrypoint: mcp-obsidian
+
+env:
+  OBSIDIAN_API_KEY:
+    required: true
+    description: API key for Obsidian Local REST API
+
+  OBSIDIAN_HOST:
+    default: 127.0.0.1
+
+  OBSIDIAN_PORT:
+    default: 27124
+
+  OBSIDIAN_PROTOCOL:
+    default: https
